@@ -19,11 +19,12 @@ or from the command line:
     python3 publicwww.py search '"angular.min.js"' --per-page 20
     python3 publicwww.py export '"angular.min.js"' > sites.txt
     python3 publicwww.py cluster-create --query '"googletagmanager.com/gtm.js"'
+    python3 publicwww.py cluster-create --query 'like:"online course" site:de' --limit 100
     python3 publicwww.py extract 12 --presets email,phone > contacts.csv
+    python3 publicwww.py signatures 12
 """
 
 import argparse
-import csv
 import json
 import os
 import sys
@@ -33,7 +34,7 @@ import urllib.parse
 import urllib.request
 
 API = os.environ.get("PUBLICWWW_API", "https://api.publicwww.com")
-USER_AGENT = "publicwww-api-python/1.1"
+USER_AGENT = "publicwww-api-python/1.2"
 
 
 class PublicWWWError(Exception):
@@ -138,13 +139,17 @@ class Client:
                 return
             page += 1
 
-    def create_cluster(self, query=None, domains=None, name=None):
+    def create_cluster(self, query=None, domains=None, name=None, limit=None):
         """A new cluster from a search (query=, costs one search like
         search()) or from a list of domains or urls (domains=; only sites in
-        the index are kept). 409 cluster_limit when the account has 100."""
+        the index are kept). limit= takes only the first N results of the
+        search, in its own order: pass it with like:, or the cluster takes the
+        plan's maximum. 409 cluster_limit when the account has 100."""
         body = {"query": query} if query is not None else {"domains": list(domains or [])}
         if name:
             body["name"] = name
+        if limit and query is not None:
+            body["limit"] = limit
         return self._json("/v1/clusters", body=body)
 
     def combine_clusters(self, operation, cluster_ids, name=None):
@@ -170,6 +175,21 @@ class Client:
                 "offset": offset, "limit": limit, "skip_empty": skip_empty}
         return self._json("/v1/clusters/%d/extract" % int(cluster_id), body=body)
 
+    def extract_csv(self, cluster_id, presets=None, regex=None, offset=0, limit=1000, skip_empty=True,
+                    delimiter=None, header=False):
+        """One part of an extraction as CSV: a dict with csv (the text),
+        next_offset (None when the cluster is done) and points_left. The
+        delimiter is a comma by default; header=True adds a first line with
+        the column names. Costs extraction points."""
+        body = {"presets": list(presets or []), "regex": list(regex or []), "offset": offset, "limit": limit,
+                "skip_empty": skip_empty, "format": "csv", "header": header}
+        if delimiter:
+            body["delimiter"] = delimiter
+        with self._open("/v1/clusters/%d/extract" % int(cluster_id), body=body) as res:
+            next_offset = res.headers.get("X-Next-Offset")
+            return {"csv": res.read().decode(), "next_offset": int(next_offset) if next_offset else None,
+                    "points_left": int(res.headers.get("X-Points-Left") or 0)}
+
     def iter_extract(self, cluster_id, presets=None, regex=None, offset=0, limit=1000, skip_empty=True, meta=None):
         """Every row of an extraction over the whole cluster from offset on,
         part after part (following next_offset). Pass a dict as meta to
@@ -186,6 +206,12 @@ class Client:
                                      "the day's extraction points ran out; resume with offset=%s" % part["next_offset"])
             offset = part["next_offset"]
 
+    def signatures(self, cluster_id):
+        """Code the cluster's websites share, as ready searches for more like
+        them: signatures (query, in_cluster, websites, websites_max,
+        technology), domains_used, websites_with_code. Spends nothing."""
+        return self._json("/v1/clusters/%d/signatures" % int(cluster_id))
+
     def rename_cluster(self, cluster_id, name):
         return self._json("/v1/clusters/%d/rename" % int(cluster_id), body={"name": name})
 
@@ -196,6 +222,11 @@ class Client:
 
 def _cluster_line(c):
     return "%s\t%s\t%s\t%s" % (c["id"], c["size"], c["created"], c["name"])
+
+
+def _note(res):
+    if res.get("query_note"):
+        print("note: " + res["query_note"], file=sys.stderr)
 
 
 def main(argv=None):
@@ -217,6 +248,7 @@ def main(argv=None):
     g.add_argument("--query")
     g.add_argument("--domains-file", help="one domain or url per line, - for stdin")
     c.add_argument("--name")
+    c.add_argument("--limit", type=int, help="with --query: only the first N results")
     c = sub.add_parser("cluster-combine", help="a new cluster from existing ones")
     c.add_argument("operation", choices=["and", "or", "diff"])
     c.add_argument("ids", type=int, nargs="+")
@@ -227,6 +259,9 @@ def main(argv=None):
     x.add_argument("--presets", default="", help="comma-separated names, e.g. email,phone")
     x.add_argument("--regex", action="append", default=[], help="your own expression, repeatable")
     x.add_argument("--offset", type=int, default=0, help="resume here (no header line then)")
+    x.add_argument("--delimiter", help="CSV separator, a comma by default")
+    c = sub.add_parser("signatures", help="code the sites share, as searches for more like them")
+    c.add_argument("id", type=int)
     c = sub.add_parser("cluster-rename", help="give a cluster a new name")
     c.add_argument("id", type=int)
     c.add_argument("name")
@@ -240,9 +275,10 @@ def main(argv=None):
             print(json.dumps(pw.account(), indent=2))
         elif a.cmd == "search":
             page = pw.search(a.query, page=a.page, per_page=a.per_page)
-            print("%d sites match, page %d of %d%s" % (
-                page["total"], page["page"], page["total_pages"],
+            print("%s%d sites match, page %d of %d%s" % (
+                "more than " if page.get("total_capped") else "", page["total"], page["page"], page["total_pages"],
                 " (cut short by the plan)" if page["truncated"] else ""))
+            _note(page)
             for r in page["results"]:
                 print("%s\t%s\t%s" % ("" if r["rank"] is None else r["rank"], r["domain"], r["url"]))
         elif a.cmd == "export":
@@ -264,7 +300,9 @@ def main(argv=None):
                 print(d)
         elif a.cmd == "cluster-create":
             if a.query is not None:
-                print(_cluster_line(pw.create_cluster(query=a.query, name=a.name)))
+                c = pw.create_cluster(query=a.query, name=a.name, limit=a.limit)
+                print(_cluster_line(c))
+                _note(c)
             else:
                 f = sys.stdin if a.domains_file == "-" else open(a.domains_file)
                 domains = [line.strip() for line in f if line.strip()]
@@ -276,14 +314,23 @@ def main(argv=None):
                 print("%s\t%s" % (p["name"], p["about"]))
         elif a.cmd == "extract":
             presets = [p for p in a.presets.split(",") if p.strip()]
-            out = csv.writer(sys.stdout, lineterminator="\n")
-            if a.offset == 0:
-                out.writerow(["domain"] + presets + a.regex)
-            meta, n = {}, 0
-            for r in pw.iter_extract(a.id, presets=presets, regex=a.regex, offset=a.offset, meta=meta):
-                out.writerow([r["domain"]] + ["\n".join(v) for v in r["values"]])
-                n += 1
-            print("%d sites with matches, %s extraction points left" % (n, meta.get("points_left")), file=sys.stderr)
+            offset = a.offset
+            while offset is not None:
+                part = pw.extract_csv(a.id, presets=presets, regex=a.regex, offset=offset,
+                                      delimiter=a.delimiter, header=offset == 0)
+                sys.stdout.write(part["csv"])
+                offset = part["next_offset"]
+                if offset is not None and part["points_left"] <= 0:
+                    print("the day's extraction points ran out; resume with --offset %d" % offset, file=sys.stderr)
+                    return 1
+            print("%s extraction points left" % part["points_left"], file=sys.stderr)
+        elif a.cmd == "signatures":
+            res = pw.signatures(a.id)
+            for s in res["signatures"]:
+                websites = s["websites"] if s["websites"] is not None else "<%s" % s["websites_max"]
+                print("%s\t%s\t%s\t%s" % (s["query"], s["in_cluster"], websites, s.get("technology", "")))
+            if res.get("note"):
+                print("note: " + res["note"], file=sys.stderr)
         elif a.cmd == "cluster-rename":
             print(_cluster_line(pw.rename_cluster(a.id, a.name)))
         elif a.cmd == "cluster-delete":

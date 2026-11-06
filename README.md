@@ -54,7 +54,10 @@ pull values out of their page source or to combine with other clusters. See
 
 ```sh
 python3 publicwww.py cluster-create --query '"googletagmanager.com/gtm.js"'   # prints id, size, created, name
+python3 publicwww.py cluster-create --query 'like:"online course" site:de' --limit 100   # sites about a topic; like: removes nothing, so pass --limit
 python3 publicwww.py extract 12 --presets email,phone > contacts.csv          # the whole cluster, part after part
+python3 publicwww.py extract 12 --presets email --delimiter ';' > emails.csv
+python3 publicwww.py signatures 12    # code the sites share, as searches for more like them
 python3 publicwww.py extract 12 --regex '/data-site-id="([0-9]+)"/i' > ids.csv
 python3 publicwww.py cluster-combine diff 14 12 --name "new this month"       # also: and, or
 python3 publicwww.py clusters      # and: cluster ID, presets, cluster-rename ID NAME, cluster-delete ID
@@ -63,6 +66,7 @@ python3 publicwww.py clusters      # and: cluster ID, presets, cluster-rename ID
 ```python
 gtm = pw.create_cluster(query='"googletagmanager.com/gtm.js"')    # costs one search
 mine = pw.create_cluster(domains=["example.com", "https://example.org/"], name="mine")
+topic = pw.create_cluster(query='like:"online course" site:de', limit=100)   # the first 100 by similarity
 
 # Every site, in parts of up to 1000 (following next_offset); spends extraction points.
 for row in pw.iter_extract(gtm["id"], presets=["email", "phone"]):
