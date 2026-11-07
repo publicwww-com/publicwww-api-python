@@ -1,7 +1,7 @@
 # PublicWWW API - Python
 
 A small client for the [PublicWWW API](https://publicwww.com/docs/api/): search the
-source code (HTML, JavaScript, CSS) of hundreds of millions of websites from your
+source code (HTML, JavaScript, CSS) of web pages from your
 own code. One file, standard library only, Python 3.8+.
 
 ## Setup
